@@ -1,0 +1,128 @@
+===============================================================================
+TAOBAO MCP SERVER - USAGE INSTRUCTIONS
+Version: 1.0
+===============================================================================
+
+OVERVIEW
+--------
+This MCP server provides two tools for scraping Taobao/Tmall products:
+1. initialize_login - Set up browser session and handle login
+2. fetch_product_info - Scrape product data and return as Markdown
+
+
+INSTALLATION
+------------
+1. Install dependencies:
+   cd taobao_mcp
+   uv pip install -e .
+
+   OR with regular pip:
+   pip install -e .
+
+2. Install Playwright browsers:
+   playwright install chromium
+
+
+CONFIGURATION FOR CLAUDE DESKTOP
+---------------------------------
+Add this to your Claude Desktop config file:
+
+Location:
+- macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
+- Windows: %APPDATA%\Claude\claude_desktop_config.json
+
+Configuration:
+{
+  "mcpServers": {
+    "taobao-scraper": {
+      "command": "python3",
+      "args": [
+        "/Users/jeremydong/Desktop/taobao-agent/taobao_mcp/server.py"
+      ]
+    }
+  }
+}
+
+Adjust the path to match your actual installation location.
+
+
+USAGE WORKFLOW
+--------------
+1. Start Claude Desktop (it will automatically start the MCP server)
+
+2. Initialize login (FIRST TIME ONLY):
+   - Ask Claude to use the "initialize_login" tool
+   - A browser window will open
+   - If login is required, scan the QR code in the browser
+   - Wait for successful login
+   - The session is saved for future use
+
+3. Fetch product information:
+   - Ask Claude to use "fetch_product_info" with a product URL or ID
+   - Examples:
+     * Product ID: "881280651752"
+     * Direct URL: "https://detail.tmall.com/item.htm?id=881280651752"
+     * Short link: "https://e.tb.cn/h.xxx"
+     * Share text: "【淘宝】product https://e.tb.cn/h.xxx"
+
+4. The tool returns Markdown-formatted product information including:
+   - Basic info (title, price, store)
+   - Images (thumbnails and detail images)
+   - Product parameters
+   - Customer reviews
+   - Q&A section
+
+
+EXAMPLE CONVERSATION WITH CLAUDE
+---------------------------------
+User: "Initialize the Taobao scraper"
+Claude: [Calls initialize_login tool]
+Claude: "The browser has been initialized. Please scan the QR code if needed."
+
+User: "Fetch product info for https://detail.tmall.com/item.htm?id=881280651752"
+Claude: [Calls fetch_product_info tool]
+Claude: [Returns formatted Markdown with product details]
+
+
+TROUBLESHOOTING
+---------------
+1. "Browser not initialized" error:
+   - Call initialize_login first
+   - Complete any required login steps
+
+2. "Login required" error:
+   - The saved session expired
+   - Call initialize_login again and re-login
+
+3. "Could not extract product ID" error:
+   - Verify the product URL/ID is correct
+   - Try using the direct product ID instead of short links
+
+4. Import errors:
+   - Ensure all dependencies are installed
+   - Run: pip install mcp playwright aiohttp pydantic
+
+5. Playwright browser not found:
+   - Run: playwright install chromium
+
+
+NOTES
+-----
+- The browser session persists across multiple product fetches
+- Login only needs to be done once (unless session expires)
+- The browser window must remain open while scraping
+- The MCP server runs as a long-lived process
+- Markdown responses can be directly used by Claude for analysis
+
+
+TECHNICAL DETAILS
+-----------------
+- Uses Playwright for browser automation
+- Persistent browser profile in ../user_data/chrome_profile/
+- Returns markdown-formatted text (not files)
+- Supports both Taobao and Tmall products
+- Handles share links, short links, and direct URLs
+- Automatic QR code login detection
+
+
+===============================================================================
