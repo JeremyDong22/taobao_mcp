@@ -4,49 +4,67 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the Taobao Agent project - a comprehensive Taobao/Tmall product information scraper with both standalone and MCP server implementations.
+This is the Taobao MCP Server - an MCP (Model Context Protocol) server that exposes Taobao/Tmall product information scraping functionality to Claude Code and other AI assistants.
 
 ## Project Structure
 
 ```
-taobao-agent/
-├── taobao_scraper/             # Standalone scraper module
-│   ├── scrape_to_markdown.py   # Main scraper script (900+ lines)
-│   ├── user_data/              # Browser profile and authentication state
-│   ├── product_info/           # Output: generated Markdown product files
-│   ├── knowledge/              # Technical documentation
-│   └── CLAUDE.md               # Detailed scraper documentation
-│
-└── taobao_mcp/                 # MCP (Model Context Protocol) server
-    ├── server.py               # MCP server implementation
-    ├── taobao_scraper.py       # Core scraper logic for MCP
-    ├── image_fetcher.py        # Image handling utilities
-    ├── pyproject.toml          # Python package configuration
-    └── README.md               # MCP server usage instructions
+taobao_mcp/
+├── server.py               # MCP server implementation
+├── taobao_scraper.py       # Core scraper logic with Playwright automation
+├── image_utils.py          # Image download and processing utilities
+├── unified_fetcher.py      # Unified product fetching interface
+├── pyproject.toml          # Python package configuration
+├── README.md               # Detailed usage instructions
+├── USAGE.txt               # Quick reference guide
+└── __init__.py             # Package initialization
 ```
 
-## Components
+## Core Components
 
-### taobao_scraper
-Standalone Python script for scraping Taobao/Tmall product information to Markdown files. Uses Playwright for browser automation with persistent login sessions. See `taobao_scraper/CLAUDE.md` for detailed documentation.
+### server.py
+MCP server implementation that exposes tools for:
+- Browser session initialization and login management
+- Product information scraping from Taobao/Tmall URLs
+- Returns structured product data to AI assistants
 
-**Usage:**
-```bash
-cd taobao_scraper
-python3 scrape_to_markdown.py "【淘宝】product link"
+### taobao_scraper.py
+Core scraping logic using Playwright for browser automation:
+- Handles Taobao/Tmall product page scraping
+- Manages persistent browser sessions with login state
+- Extracts product details, pricing, images, and reviews
+
+### image_utils.py
+Image handling utilities for:
+- Downloading product images
+- Converting images to base64 encoding
+- Image processing and optimization
+
+### unified_fetcher.py
+Unified interface for fetching product information from various sources
+
+## Usage
+
+Configure in Claude Code MCP settings (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "taobao": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/taobao_mcp", "run", "taobao-mcp"]
+    }
+  }
+}
 ```
 
-### taobao_mcp
-MCP server that exposes Taobao scraping functionality to Claude Code and other AI assistants. Allows Claude to fetch and analyze Taobao product information on demand.
-
-**Usage:**
-Configure in Claude Code MCP settings, then use tools:
-- `taobao_initialize_login`: Set up browser session
-- `taobao_fetch_product_info`: Scrape product data
+Available MCP tools:
+- `taobao_initialize_login`: Set up browser session and handle authentication
+- `taobao_fetch_product_info`: Scrape product data from Taobao/Tmall URLs
 
 ## Development Guidelines
 
-- Both modules share similar scraping logic but serve different use cases
-- Standalone scraper outputs to files, MCP server returns structured data
-- Browser session management is handled independently in each module
-- See individual CLAUDE.md files in each folder for module-specific guidance
+- Uses Playwright for reliable browser automation
+- Persistent browser sessions to maintain login state
+- Returns structured JSON data for AI consumption
+- See README.md for detailed setup and usage instructions
