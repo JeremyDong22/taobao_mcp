@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """
-Version: 2.4
+Version: 2.5
 Created: 2025-11-17
-Updated: 2025-11-17
+Updated: 2025-11-18
 
 Taobao Product Scraper - Reusable module for MCP server
 Provides scraping functionality for Taobao/Tmall products with browser automation.
+
+Changes in v2.5:
+- ✅ CRITICAL DEBUG: Added comprehensive logging throughout scraping pipeline
+- ✅ Added detailed logs in extract_product_id to track URL parsing
+- ✅ Added logs in short link resolution (browser & HTTP methods)
+- ✅ Added logs in scrape_product to track each scraping step
+- ✅ Helps diagnose where the process gets stuck (short link, page load, etc.)
+- ✅ All log messages tagged with [Scraper], [LinkExtractor], [BrowserResolver], [HTTPResolver]
+- ✅ TIMEOUT OPTIMIZATION: Reduced browser resolution timeout from 30s to 15s
+- ✅ TIMEOUT OPTIMIZATION: Reduced HTTP resolution timeout from 10s to 8s
+- ✅ Added specific TimeoutError handling for better error messages
 
 Changes in v2.4:
 - ✅ FIXED: Added pattern for .jpg_q50.jpg_.webp format (actual Taobao CDN format)
@@ -171,76 +182,96 @@ class TaobaoLinkExtractor:
     @staticmethod
     async def extract_product_id(user_input: str, page=None) -> Optional[str]:
         """Extract product ID from various input formats"""
+        print(f"\n[LinkExtractor] Starting product ID extraction from: {user_input[:100]}...")
+
         if not user_input:
+            print("[LinkExtractor] Empty input, returning None")
             return None
 
         user_input = user_input.strip()
 
         # Try direct link pattern first (highest priority)
+        print("[LinkExtractor] Step 1: Trying direct link pattern...")
         direct_match = re.search(TaobaoLinkExtractor.DIRECT_LINK_PATTERN, user_input)
         if direct_match:
-            return direct_match.group(1)
+            product_id = direct_match.group(1)
+            print(f"[LinkExtractor] ✅ Found product ID via direct link: {product_id}")
+            return product_id
 
         # Try short link (resolve before trying raw ID to avoid false matches)
+        print("[LinkExtractor] Step 2: Trying short link pattern...")
         short_link_match = re.search(TaobaoLinkExtractor.SHORT_LINK_PATTERN, user_input)
         if short_link_match:
             short_url = short_link_match.group(0)
-            print(f"Detected short link: {short_url}")
+            print(f"[LinkExtractor] 🔗 Detected short link: {short_url}")
 
             # Try browser resolution first (more reliable)
             if page:
-                print("Attempting browser resolution...")
+                print("[LinkExtractor] Attempting browser resolution...")
                 resolved_url = await TaobaoLinkExtractor.resolve_short_link_with_browser(short_url, page)
                 if not resolved_url:
-                    print("Browser resolution failed, trying HTTP...")
+                    print("[LinkExtractor] ⚠️ Browser resolution failed, trying HTTP...")
                     resolved_url = await TaobaoLinkExtractor.resolve_short_link(short_url)
             else:
-                print("No browser available, using HTTP resolution...")
+                print("[LinkExtractor] No browser available, using HTTP resolution...")
                 resolved_url = await TaobaoLinkExtractor.resolve_short_link(short_url)
 
             if resolved_url:
-                print(f"Short link resolved to: {resolved_url}")
+                print(f"[LinkExtractor] ✅ Short link resolved to: {resolved_url}")
                 # Recursively extract ID from resolved URL (without page to avoid re-resolving)
                 product_id = await TaobaoLinkExtractor.extract_product_id(resolved_url, page=None)
                 if product_id:
-                    print(f"Successfully extracted product ID: {product_id}")
+                    print(f"[LinkExtractor] ✅ Successfully extracted product ID: {product_id}")
                     return product_id
                 else:
-                    print(f"WARNING: Resolved URL but could not extract ID from: {resolved_url}")
+                    print(f"[LinkExtractor] ⚠️ WARNING: Resolved URL but could not extract ID from: {resolved_url}")
                     # Try one more time with the page context
                     return await TaobaoLinkExtractor.extract_product_id(resolved_url, page)
             else:
-                print("Failed to resolve short link - both methods failed")
+                print("[LinkExtractor] ❌ Failed to resolve short link - both methods failed")
                 return None
 
         # Try raw product ID (last resort - only if no links found)
+        print("[LinkExtractor] Step 3: Trying raw product ID pattern...")
         id_match = re.search(TaobaoLinkExtractor.PRODUCT_ID_PATTERN, user_input)
         if id_match:
-            return id_match.group(1)
+            product_id = id_match.group(1)
+            print(f"[LinkExtractor] ✅ Found raw product ID: {product_id}")
+            return product_id
 
+        print("[LinkExtractor] ❌ No product ID found in input")
         return None
 
     @staticmethod
     async def resolve_short_link_with_browser(short_url: str, page) -> Optional[str]:
-        """Resolve short links using browser"""
+        """Resolve short links using browser (15s timeout)"""
         try:
-            await page.goto(short_url, wait_until='domcontentloaded', timeout=30000)
+            print(f"[BrowserResolver] Navigating to short URL: {short_url}")
+            # Reduced timeout from 30s to 15s to avoid long waits
+            await page.goto(short_url, wait_until='domcontentloaded', timeout=15000)
+            print("[BrowserResolver] Page loaded, waiting 2 seconds...")
             await asyncio.sleep(2)
             final_url = page.url
+            print(f"[BrowserResolver] ✅ Resolved to: {final_url}")
             return final_url
+        except asyncio.TimeoutError:
+            print(f"[BrowserResolver] ⏱️ Timeout (15s) navigating to {short_url}")
+            return None
         except Exception as e:
             # Log error but don't fail - will try HTTP method
-            print(f"Browser resolution failed for {short_url}: {e}")
+            print(f"[BrowserResolver] ❌ Browser resolution failed for {short_url}: {e}")
             return None
 
     @staticmethod
-    async def resolve_short_link(short_url: str, timeout: int = 10) -> Optional[str]:
-        """Resolve short links using HTTP"""
+    async def resolve_short_link(short_url: str, timeout: int = 8) -> Optional[str]:
+        """Resolve short links using HTTP (8s timeout)"""
         try:
+            print(f"[HTTPResolver] Resolving short URL: {short_url} (timeout={timeout}s)")
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
+            # Reduced timeout from 10s to 8s for faster failure detection
             timeout_config = aiohttp.ClientTimeout(total=timeout)
             connector = aiohttp.TCPConnector(ssl=ssl_context)
 
@@ -253,10 +284,14 @@ class TaobaoLinkExtractor:
                     }
                 ) as response:
                     final_url = str(response.url)
+                    print(f"[HTTPResolver] ✅ Resolved to: {final_url}")
                     return final_url
+        except asyncio.TimeoutError:
+            print(f"[HTTPResolver] ⏱️ Timeout ({timeout}s) resolving {short_url}")
+            return None
         except Exception as e:
             # Log error but don't fail
-            print(f"HTTP resolution failed for {short_url}: {e}")
+            print(f"[HTTPResolver] ❌ HTTP resolution failed for {short_url}: {e}")
             return None
 
     @staticmethod
@@ -655,56 +690,80 @@ class TaobaoScraper:
             ValueError: If product ID cannot be extracted
             RuntimeError: If browser is not initialized
         """
+        print(f"\n{'='*60}")
+        print(f"[Scraper] Starting product scrape")
+        print(f"[Scraper] Input: {user_input[:100]}")
+        print(f"{'='*60}\n")
+
         if not self._is_initialized or not self.page:
             raise RuntimeError("Browser not initialized. Call initialize() first.")
 
         # Verify browser is still alive
+        print("[Scraper] Verifying browser is alive...")
         try:
             await self.page.evaluate("1 + 1")
+            print("[Scraper] ✅ Browser is alive")
         except Exception as e:
             # Browser was closed externally
             self._is_initialized = False
+            print(f"[Scraper] ❌ Browser session was closed: {e}")
             raise RuntimeError(
                 f"Browser session was closed. Please call taobao_initialize_login again. "
                 f"Error: {str(e)}"
             )
 
         # Extract product ID
+        print("[Scraper] Extracting product ID...")
         extractor = TaobaoLinkExtractor()
         product_id = await extractor.extract_product_id(user_input, page=self.page)
 
         if not product_id:
+            print(f"[Scraper] ❌ Failed to extract product ID from: {user_input}")
             raise ValueError(f"Could not extract product ID from: {user_input}")
+
+        print(f"[Scraper] ✅ Product ID: {product_id}")
 
         # Navigate to product page
         product_url = extractor.build_product_url(product_id, platform='tmall')
+        print(f"[Scraper] Navigating to product page: {product_url}")
         await self.page.goto(product_url, wait_until='domcontentloaded', timeout=60000)
+        print("[Scraper] Page loaded, waiting 3 seconds...")
         await asyncio.sleep(3)
 
         # Check if redirected to login/confirmation page
         current_url = self.page.url
+        print(f"[Scraper] Current URL: {current_url}")
+
         if 'login.taobao.com' in current_url or 'login.tmall.com' in current_url:
+            print("[Scraper] ⚠️ Redirected to login page, trying quick entry...")
             # Try to click quick entry button if present (user already logged in, just needs confirmation)
             quick_entry_clicked = await self._handle_quick_entry_button()
 
             # Check if we successfully bypassed the confirmation
             current_url = self.page.url
             if not quick_entry_clicked or ('login.taobao.com' in current_url or 'login.tmall.com' in current_url):
+                print("[Scraper] ❌ Login required!")
                 raise RuntimeError(
                     "Login required! Please run taobao_initialize_login first and complete the login process."
                 )
 
+        print(f"[Scraper] Waiting for product title selector...")
         await self.page.wait_for_selector(TaobaoSelectors.PRODUCT_TITLE, state='attached', timeout=45000)
+        print("[Scraper] ✅ Product title found")
 
         # Check for share link and clean if needed
         current_url = self.page.url
         if is_share_link(current_url):
+            print("[Scraper] ⚠️ Share link detected, cleaning URL...")
             clean_url = clean_share_url(current_url, product_id)
+            print(f"[Scraper] Navigating to clean URL: {clean_url}")
             await self.page.goto(clean_url, wait_until='domcontentloaded', timeout=60000)
             await asyncio.sleep(3)
             await self.page.wait_for_selector(TaobaoSelectors.PRODUCT_TITLE, state='attached', timeout=45000)
+            print("[Scraper] ✅ Clean URL loaded")
 
         # Initialize data
+        print("[Scraper] Initializing scraped data structure...")
         scraped_data = {
             'product_id': product_id,
             'product_url': product_url,
@@ -712,29 +771,54 @@ class TaobaoScraper:
         }
 
         # Scrape all sections
+        print("[Scraper] Scraping basic info...")
         basic_info = await self._scrape_basic_info()
         scraped_data.update(basic_info)
+        print(f"[Scraper] ✅ Basic info: title={scraped_data.get('title', 'N/A')[:50]}")
 
+        print("[Scraper] Scraping parameters...")
         scraped_data['parameters'] = await self._scrape_parameters()
-        scraped_data['detail_images'] = await self._scrape_detail_images()
-        scraped_data['reviews'] = await self._scrape_reviews()
+        print(f"[Scraper] ✅ Parameters: {len(scraped_data['parameters'])} items")
 
+        print("[Scraper] Scraping detail images...")
+        scraped_data['detail_images'] = await self._scrape_detail_images()
+        print(f"[Scraper] ✅ Detail images: {len(scraped_data['detail_images'])} images")
+
+        print("[Scraper] Scraping reviews...")
+        scraped_data['reviews'] = await self._scrape_reviews()
+        print(f"[Scraper] ✅ Reviews: {len(scraped_data['reviews'])} reviews")
+
+        print("[Scraper] Scraping Q&A...")
         try:
             scraped_data['qa'] = await self._scrape_qa()
-        except Exception:
+            print(f"[Scraper] ✅ Q&A: {len(scraped_data['qa'])} items")
+        except Exception as e:
+            print(f"[Scraper] ⚠️ Q&A failed: {e}")
             scraped_data['qa'] = []
 
         # Scrape shipping information
+        print("[Scraper] Scraping shipping info...")
         scraped_data['shipping'] = await self._scrape_shipping_info()
+        print(f"[Scraper] ✅ Shipping info scraped")
 
         # Scrape shop details
+        print("[Scraper] Scraping shop details...")
         scraped_data['shop'] = await self._scrape_shop_details()
+        print(f"[Scraper] ✅ Shop details scraped")
 
         # Scrape guarantees
+        print("[Scraper] Scraping guarantees...")
         scraped_data['guarantees'] = await self._scrape_guarantees()
+        print(f"[Scraper] ✅ Guarantees: {len(scraped_data['guarantees'])} items")
 
         # Scrape specifications (colors, sizes, stock)
+        print("[Scraper] Scraping specifications...")
         scraped_data['specifications'] = await self._scrape_specifications()
+        print(f"[Scraper] ✅ Specifications scraped")
+
+        print(f"\n{'='*60}")
+        print("[Scraper] ✅ Product scraping completed successfully!")
+        print(f"{'='*60}\n")
 
         return scraped_data
 

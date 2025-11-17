@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Version: 1.0
+Version: 1.1
 Created: 2025-11-17
+Updated: 2025-11-18
 
 Unified Product Fetcher - Returns all product information and images with pagination.
 
@@ -11,6 +12,12 @@ a single unified tool that:
 - Labels each image with its type (gallery, detail, sku, review)
 - Applies pagination to the combined image list
 - Returns pagination metadata for easy navigation
+
+Changes in v1.1:
+- ✅ CRITICAL FIX: Review photos bug - photos are strings, not dicts
+- ✅ Added type checking to handle both string URLs and dict formats
+- ✅ Prevents TypeError when processing review photos
+- ✅ This was causing the MCP tool to hang/crash with certain inputs
 
 Changes in v1.0:
 - ✅ Initial implementation combining all image types
@@ -206,10 +213,17 @@ def _collect_all_images(product_data: dict) -> List[Dict]:
     for review in reviews:
         photos = review.get('photos', [])
         for photo in photos:
-            all_images.append({
-                'url': photo['url'],
-                'type': 'review'
-            })
+            # photos is a list of URL strings, not dictionaries
+            if isinstance(photo, str):
+                all_images.append({
+                    'url': photo,
+                    'type': 'review'
+                })
+            elif isinstance(photo, dict) and 'url' in photo:
+                all_images.append({
+                    'url': photo['url'],
+                    'type': 'review'
+                })
 
     return all_images
 
