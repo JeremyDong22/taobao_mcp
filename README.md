@@ -340,6 +340,60 @@ python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright
 
 **Solution**: Try using the direct product URL or ID instead
 
+### MCP Server Connection Failed (Claude Code)
+
+**Symptoms**:
+- MCP server shows as "failed" in `/mcp` management panel
+- Error in logs: `"No such file or directory (os error 2)"`
+- Logs location: `/Users/yourusername/Library/Caches/claude-cli-nodejs/-Users-yourusername-Desktop-test/mcp-logs-taobao-scraper/`
+
+**Common Causes**:
+1. **Incorrect path in `.mcp.json`**: The configuration file may have wrong directory paths
+2. **Using wrong Python interpreter**: Not using the virtual environment's Python
+3. **Double-nested directories**: Path like `/path/to/taobao_mcp/taobao_mcp` (incorrect)
+
+**Solution**:
+
+1. **Check your `.mcp.json` configuration** (located in your project root):
+   ```json
+   {
+     "mcpServers": {
+       "taobao-scraper": {
+         "command": "/absolute/path/to/taobao_mcp/.venv/bin/python",
+         "args": [
+           "/absolute/path/to/taobao_mcp/server.py"
+         ],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+2. **Verify paths are correct**:
+   ```bash
+   # Check Python exists
+   ls -la /path/to/taobao_mcp/.venv/bin/python
+
+   # Check server.py exists
+   ls -la /path/to/taobao_mcp/server.py
+
+   # Test server can start
+   /path/to/taobao_mcp/.venv/bin/python /path/to/taobao_mcp/server.py <<< '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+   ```
+
+3. **Common mistakes to avoid**:
+   - ❌ Using `python3` instead of full path to venv Python
+   - ❌ Path like `/path/to/taobao_mcp/taobao_mcp/server.py` (double directory)
+   - ❌ Relative paths like `./server.py` (use absolute paths)
+   - ✅ Correct: Full absolute paths to both Python and server.py
+
+4. **After fixing, restart Claude Code** to reload the MCP server
+
+**Debug Tips**:
+- Run `claude --debug` to see detailed logs
+- Check log files in `~/Library/Caches/claude-cli-nodejs/`
+- Look for the most recent log file in the `mcp-logs-taobao-scraper/` directory
+
 ---
 
 ## 📂 File Structure
