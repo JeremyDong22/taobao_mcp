@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
 """
-Version: 1.0
+Version: 4.1
 Created: 2025-11-17
+Updated: 2025-11-17
 
 Taobao MCP Server - Model Context Protocol server for Taobao product scraping.
 
-Provides two main tools:
-1. initialize_login - Initialize browser session and handle Taobao login
-2. fetch_product_info - Scrape product information and return as Markdown
+Changes in v4.1:
+- ✅ CRITICAL UX FIX: Updated tool description to force agent to auto-fetch all pages
+- ✅ Added explicit instructions: "DO NOT ask user if they want more - fetch everything"
+- ✅ Added workflow examples showing correct vs incorrect behavior
+- ✅ User feedback: "User shouldn't be asked if they want page 2 - just fetch everything"
+
+Changes in v4.0:
+- ✅ SIMPLIFIED: Reduced from 6 tools to 2 tools for better UX
+- ✅ NEW: Unified tool that fetches ALL product info and images at once
+- ✅ IMPROVED: Images are labeled by type (gallery, detail, sku, review)
+- ✅ KEPT: Pagination support (offset/limit) to avoid token limits
+- ✅ REMOVED: Split image_fetchers approach (was confusing for users)
+
+Tools:
+1. taobao_initialize_login - Initialize browser session and handle login
+2. taobao_fetch_product - Get ALL product info and images with pagination (auto-loops)
 
 This server maintains a persistent browser session for efficient scraping.
+All images are fetched together and labeled by type for clarity.
 """
 
 import asyncio
 from typing import Optional
+from datetime import datetime, timedelta
 from pydantic import BaseModel, Field, field_validator
 
 # MCP imports
@@ -23,41 +39,59 @@ from mcp.types import (
     Tool,
     TextContent,
     ImageContent,
-    EmbeddedResource,
 )
 
 # Local imports
-from taobao_scraper import TaobaoScraper, generate_markdown
+from taobao_scraper import TaobaoScraper
+from unified_fetcher import fetch_product_with_images
+
+
+# ==================== CONFIGURATION ====================
+
+# Product cache TTL (30 minutes)
+PRODUCT_CACHE_TTL_MINUTES = 30
+
+
+# ==================== PRODUCT CACHE ====================
+
+class ProductCache:
+    """Simple in-memory cache for scraped product data."""
+
+    def __init__(self, ttl_minutes: int = PRODUCT_CACHE_TTL_MINUTES):
+        self.cache = {}  # {product_id: {'data': dict, 'timestamp': datetime}}
+        self.ttl = timedelta(minutes=ttl_minutes)
+
+    def get(self, product_id: str) -> Optional[dict]:
+        """Get cached product data if still valid."""
+        if product_id in self.cache:
+            entry = self.cache[product_id]
+            if datetime.now() - entry['timestamp'] < self.ttl:
+                print(f"[Cache] HIT for product {product_id}")
+                return entry['data']
+            else:
+                print(f"[Cache] EXPIRED for product {product_id}")
+                del self.cache[product_id]
+        print(f"[Cache] MISS for product {product_id}")
+        return None
+
+    def set(self, product_id: str, data: dict):
+        """Cache product data."""
+        self.cache[product_id] = {
+            'data': data,
+            'timestamp': datetime.now()
+        }
+        print(f"[Cache] SET for product {product_id}")
+
+    def clear(self):
+        """Clear all cached data."""
+        self.cache.clear()
+        print("[Cache] CLEARED")
 
 
 # ==================== PYDANTIC MODELS ====================
 
-class FetchProductInfoInput(BaseModel):
-    """
-    Input schema for fetch_product_info tool.
-
-    Accepts various formats:
-    - Product ID: "881280651752"
-    - Direct URL: "https://detail.tmall.com/item.htm?id=881280651752"
-    - Short link: "https://e.tb.cn/h.xxx"
-    - Share text: "【淘宝】product name https://e.tb.cn/h.xxx"
-    """
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "product_url_or_id": "881280651752"
-                },
-                {
-                    "product_url_or_id": "https://detail.tmall.com/item.htm?id=881280651752"
-                },
-                {
-                    "product_url_or_id": "【淘宝】product https://e.tb.cn/h.StvCjJlWxkNatsx?tk=xxx"
-                }
-            ]
-        }
-    }
+class ProductInputBase(BaseModel):
+    """Base model for product input validation."""
 
     product_url_or_id: str = Field(
         ...,
@@ -66,7 +100,7 @@ class FetchProductInfoInput(BaseModel):
             "- Product ID (12-13 digits): '881280651752'\n"
             "- Direct URL: 'https://detail.tmall.com/item.htm?id=881280651752'\n"
             "- Short link: 'https://e.tb.cn/h.xxx'\n"
-            "- Share text containing any of the above formats"
+            "- Share text: '【淘宝】product https://e.tb.cn/h.xxx'"
         ),
         min_length=1,
         max_length=500
@@ -83,8 +117,9 @@ class FetchProductInfoInput(BaseModel):
 
 # ==================== MCP SERVER ====================
 
-# Global scraper instance (persists across tool calls)
+# Global instances
 scraper: Optional[TaobaoScraper] = None
+product_cache = ProductCache()
 
 # Create MCP server
 mcp_server = Server("taobao-mcp")
@@ -92,41 +127,21 @@ mcp_server = Server("taobao-mcp")
 
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
-    """
-    List available tools for the MCP server.
+    """List available tools for the MCP server."""
 
-    Returns:
-        List of Tool objects describing available operations
-    """
     return [
+        # Tool 1: Initialize Login
         Tool(
             name="taobao_initialize_login",
             description=(
-                "**REQUIRED FIRST STEP** - Initialize Taobao/Tmall (淘宝/天猫) browser session and handle login authentication.\n\n"
-                "**Keywords**: Taobao, 淘宝, Tmall, 天猫, login, initialize, setup, authentication, QR code, 登录, 初始化\n\n"
-                "**When to use**:\n"
-                "- User mentions Taobao (淘宝), Tmall (天猫), or Chinese e-commerce\n"
-                "- User provides a Taobao/Tmall product link or share text\n"
-                "- User wants to scrape, analyze, or research Taobao products\n"
-                "- MUST be called BEFORE taobao_fetch_product_info\n\n"
-                "**What this tool does**:\n"
-                "1. Launches a persistent browser with saved login credentials\n"
-                "2. Navigates to Taobao homepage to test authentication\n"
-                "3. Detects if Taobao requires login (QR code scan 扫码登录)\n"
-                "4. Waits for user to complete login if needed\n"
-                "5. Saves the authenticated session for all future scraping\n\n"
-                "**Important notes**:\n"
-                "- Only needs to be called ONCE per session\n"
-                "- Browser window remains open to maintain the session\n"
-                "- If login required, user scans QR code in browser window\n"
-                "- Session persists across multiple product fetches\n"
-                "- NO parameters needed - just call it\n\n"
-                "**Returns**:\n"
-                "- status: 'success', 'login_required', 'already_initialized', or 'error'\n"
-                "- message: Detailed status and next steps\n\n"
-                "**Example workflow**:\n"
-                "User: '帮我做一个research' + Taobao link\n"
-                "Assistant: Calls taobao_initialize_login first → Then calls taobao_fetch_product_info"
+                "**REQUIRED FIRST STEP** - Initialize Taobao/Tmall browser session and handle login.\n\n"
+                "**When to use**: Before calling any other taobao_fetch_* tools.\n\n"
+                "**What it does**:\n"
+                "1. Launches persistent browser with saved credentials\n"
+                "2. Tests authentication status\n"
+                "3. Handles QR code login if needed\n"
+                "4. Maintains session for all future scraping\n\n"
+                "**Only needs to be called ONCE per session.**"
             ),
             inputSchema={
                 "type": "object",
@@ -134,92 +149,107 @@ async def list_tools() -> list[Tool]:
                 "required": []
             }
         ),
+
+        # Tool 2: Fetch Product (Unified)
         Tool(
-            name="taobao_fetch_product_info",
+            name="taobao_fetch_product",
             description=(
-                "Fetch comprehensive product information from Taobao/Tmall (淘宝/天猫) and return as structured Markdown.\n\n"
-                "**Keywords**: Taobao, 淘宝, Tmall, 天猫, product, 商品, scrape, research, analyze, compare, 分析, 对比, 评价, reviews\n\n"
-                "**When to use**:\n"
-                "- User provides Taobao/Tmall product link, share text, or product ID\n"
-                "- User asks to research/analyze/compare Taobao products\n"
-                "- User mentions keywords: product, 商品, reviews, 评价, price, 价格\n"
-                "- User shares Chinese e-commerce links starting with e.tb.cn or detail.tmall.com\n\n"
-                "**What this tool scrapes**:\n"
-                "- Basic info: Title (标题), price (价格), store name (店铺), product ID\n"
-                "- Images: Thumbnail images (缩略图) and detailed product images (详情图)\n"
-                "- Parameters: Product specifications (参数) and attributes (属性)\n"
-                "- Reviews: Customer reviews (用户评价) with ratings, text, and photos\n"
-                "- Q&A: Customer questions and answers (问答)\n\n"
-                "**Supported input formats** (in order of reliability):\n"
-                "1. ✅ **Full share text** (RECOMMENDED): '【淘宝】假一赔四 https://e.tb.cn/h.xxx MF937 「商品名称」点击链接直接打开'\n"
-                "2. ✅ **Product ID**: '881280651752'\n"
-                "3. ✅ **Direct URL**: 'https://detail.tmall.com/item.htm?id=881280651752'\n"
-                "4. ⚠️  **Short link alone**: 'https://e.tb.cn/h.xxx' (may fail due to anti-bot protection - use full share text instead)\n"
-                "5. ✅ **Mixed text**: Any Chinese/English text containing above formats\n\n"
-                "**IMPORTANT**: Short links (e.tb.cn) work best when included in full share text. Using them alone may fail due to Taobao's anti-bot protection.\n\n"
-                "**Returns**:\n"
-                "- Markdown-formatted product information (easy for AI to analyze)\n"
-                "- Image URLs embedded as Markdown image links\n"
-                "- Tables for product parameters\n"
-                "- Structured reviews and Q&A sections\n"
-                "- Metadata: scrape time, image counts, review counts\n\n"
-                "**CRITICAL PREREQUISITE**:\n"
-                "- ⚠️ MUST call taobao_initialize_login FIRST before using this tool!\n"
-                "- Browser session must be initialized and logged in\n"
-                "- If not initialized, returns error with clear instructions\n\n"
-                "**Error handling**:\n"
-                "- Not initialized → Returns error: 'Call taobao_initialize_login first'\n"
-                "- Invalid link → Returns error: 'Could not extract product ID' + examples\n"
-                "- Scraping failed → Returns error with detailed reason (timeout, page changed, etc.)\n\n"
-                "**Example usage**:\n"
-                "User: '【淘宝】product https://e.tb.cn/h.xxx'\n"
-                "Assistant: Calls taobao_fetch_product_info(product_url_or_id='【淘宝】product https://e.tb.cn/h.xxx')"
+                "**🛍️ GET ALL PRODUCT INFO** - Fetch complete product information and ALL images with pagination.\n\n"
+                "**⚠️ CRITICAL: AUTO-FETCH ALL PAGES**\n"
+                "When user asks about a product, you MUST automatically fetch ALL images across ALL pages. "
+                "Keep calling this tool with next_offset until has_more=False. "
+                "DO NOT ask user \"do you want to see more images?\" - just fetch everything automatically in one conversation turn. "
+                "The user expects to see the complete product information, not partial data.\n\n"
+                "**Returns** (~10000-15000 tokens per page):\n"
+                "- Product title, price, store name, product ID\n"
+                "- Product parameters/specifications table\n"
+                "- ALL images from ALL categories (labeled by type):\n"
+                "  - 📸 Gallery: Main product photos from different angles\n"
+                "  - 🔍 Detail: Specifications, features, advertising materials\n"
+                "  - 🎨 SKU: Color/style variant thumbnails\n"
+                "  - ⭐ Review: Customer-uploaded real-world photos\n"
+                "- Pagination metadata (total_count, has_more, next_offset)\n\n"
+                "**Pagination** (internal detail for you, transparent to user):\n"
+                "- Default: 10 images per call (offset=0, limit=10)\n"
+                "- Max: 20 images per call\n"
+                "- First call returns basic info + first page of images\n"
+                "- KEEP CALLING with next_offset until has_more=False\n"
+                "- Response includes 'has_more' and 'next_offset' for navigation\n\n"
+                "**Image Type Labels**:\n"
+                "Each image is clearly labeled with its type (gallery/detail/sku/review) "
+                "so you understand what category it belongs to.\n\n"
+                "**Required Workflow**:\n"
+                "1. Call with offset=0 → Get first 10 images\n"
+                "2. If has_more=True, immediately call with offset=next_offset (NO user prompt needed)\n"
+                "3. Repeat step 2 until has_more=False\n"
+                "4. Only then provide your analysis to user with all images\n\n"
+                "**Example of correct behavior**:\n"
+                "User: \"Analyze this product: <url>\"\n"
+                "You: [Call offset=0] → has_more=True, next_offset=10\n"
+                "You: [Call offset=10] → has_more=True, next_offset=20\n"
+                "You: [Call offset=20] → has_more=False\n"
+                "You: \"Here's my analysis of the product with all 31 images...\"\n\n"
+                "**WRONG behavior** (DO NOT DO THIS):\n"
+                "User: \"Analyze this product\"\n"
+                "You: [Call offset=0]\n"
+                "You: \"I fetched 10/31 images. Would you like me to fetch more?\"\n"
+                "❌ This is bad UX! Fetch everything automatically!"
             ),
-            inputSchema=FetchProductInfoInput.model_json_schema()
-        )
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "product_url_or_id": {
+                        "type": "string",
+                        "description": (
+                            "Product URL, short link, share text, or product ID. "
+                            "Examples: '881280651752', 'https://detail.tmall.com/item.htm?id=123', "
+                            "'【淘宝】product https://e.tb.cn/h.xxx'"
+                        )
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Starting index for pagination (default: 0)",
+                        "default": 0,
+                        "minimum": 0
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of images to return (default: 10, max: 20)",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 20
+                    }
+                },
+                "required": ["product_url_or_id"]
+            }
+        ),
     ]
 
 
 @mcp_server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """
-    Handle tool execution requests.
-
-    Args:
-        name: Name of the tool to execute
-        arguments: Tool-specific arguments
-
-    Returns:
-        List of TextContent objects containing the tool response
-
-    Raises:
-        ValueError: If tool name is unknown
-    """
+async def call_tool(name: str, arguments: dict) -> list[TextContent | ImageContent]:
+    """Handle tool execution requests."""
     global scraper
 
+    # Route to appropriate handler
     if name == "taobao_initialize_login":
         return await handle_initialize_login()
-    elif name == "taobao_fetch_product_info":
-        return await handle_fetch_product_info(arguments)
+    elif name == "taobao_fetch_product":
+        return await handle_fetch_product(arguments)
     else:
         raise ValueError(f"Unknown tool: {name}")
 
 
+# ==================== TOOL HANDLERS ====================
+
 async def handle_initialize_login() -> list[TextContent]:
-    """
-    Handle initialize_login tool execution.
-
-    Initializes browser session and handles Taobao authentication.
-
-    Returns:
-        List containing TextContent with initialization status and instructions
-    """
+    """Handle initialize_login tool execution."""
     global scraper
 
     try:
         # Create scraper if not exists
         if scraper is None:
-            scraper = TaobaoScraper(profile_dir="../user_data/chrome_profile")
+            scraper = TaobaoScraper(profile_dir="user_data/chrome_profile")
 
         # Initialize browser
         result = await scraper.initialize()
@@ -228,23 +258,22 @@ async def handle_initialize_login() -> list[TextContent]:
         message = result.get('message', 'No message')
 
         if status == 'login_required':
-            # Wait for user to complete login (3 minutes timeout)
             response_text = (
                 f"**Status**: {status}\n\n"
                 f"{message}\n\n"
                 "Please complete the login in the browser window. "
                 "The browser will remain open for 3 minutes.\n\n"
-                "After logging in, you can proceed to use fetch_product_info."
+                "After logging in, you can proceed to use other tools."
             )
-
-            # Wait for login completion (non-blocking for MCP)
             return [TextContent(type="text", text=response_text)]
 
         elif status == 'success':
             response_text = (
                 f"**Status**: ✅ {status}\n\n"
                 f"{message}\n\n"
-                "You can now use fetch_product_info to scrape products."
+                "✅ **Ready to scrape!** You can now call:\n"
+                "1. `taobao_fetch_product_basic` (recommended first)\n"
+                "2. Then call image tools in parallel as needed"
             )
             return [TextContent(type="text", text=response_text)]
 
@@ -252,7 +281,7 @@ async def handle_initialize_login() -> list[TextContent]:
             response_text = (
                 f"**Status**: ℹ️ {status}\n\n"
                 f"{message}\n\n"
-                "Browser session is active. You can continue using fetch_product_info."
+                "Browser session is active. You can continue using other tools."
             )
             return [TextContent(type="text", text=response_text)]
 
@@ -276,127 +305,65 @@ async def handle_initialize_login() -> list[TextContent]:
         return [TextContent(type="text", text=error_text)]
 
 
-async def handle_fetch_product_info(arguments: dict) -> list[TextContent]:
-    """
-    Handle fetch_product_info tool execution.
-
-    Scrapes product information and returns formatted Markdown.
-
-    Args:
-        arguments: Dict containing product_url_or_id
-
-    Returns:
-        List containing TextContent with Markdown-formatted product information
-    """
+async def _get_or_scrape_product(product_input: str) -> dict:
+    """Get product data from cache or scrape if not cached."""
     global scraper
 
+    # Check if browser is initialized
+    if scraper is None or not scraper._is_initialized:
+        raise RuntimeError(
+            "Browser not initialized. Please call `taobao_initialize_login` first."
+        )
+
+    # Always scrape fresh data for now (cache disabled to ensure latest URL cleaning logic)
+    # TODO: Re-enable cache after URL cleaning is stable
+    print(f"[Scraper] Fetching fresh product data...")
+    product_data = await scraper.scrape_product(product_input)
+
+    product_id = product_data.get('product_id')
+    if not product_id:
+        raise ValueError("Failed to extract product ID from scraped data")
+
+    # Update cache with fresh data
+    product_cache.set(product_id, product_data)
+
+    return product_data
+
+
+async def handle_fetch_product(arguments: dict) -> list[TextContent | ImageContent]:
+    """Handle fetch_product tool execution (unified fetcher with pagination)."""
     try:
         # Validate input
-        input_data = FetchProductInfoInput(**arguments)
+        input_data = ProductInputBase(**arguments)
         product_input = input_data.product_url_or_id
 
-        # Check if browser is initialized
-        if scraper is None or not scraper._is_initialized:
-            error_text = (
-                "**Error: Browser not initialized**\n\n"
-                "Please call `taobao_initialize_login` first to set up the browser session.\n\n"
-                "**Steps**:\n"
-                "1. Call taobao_initialize_login\n"
-                "2. Complete login if required (scan QR code)\n"
-                "3. Call taobao_fetch_product_info again"
-            )
-            return [TextContent(type="text", text=error_text)]
+        # Extract pagination parameters
+        offset = arguments.get('offset', 0)
+        limit = arguments.get('limit', 10)
 
-        # Scrape product
-        product_data = await scraper.scrape_product(product_input)
+        # Get or scrape product
+        product_data = await _get_or_scrape_product(product_input)
 
-        # Generate markdown
-        markdown_output = generate_markdown(product_data)
-
-        # Add metadata header
-        metadata = (
-            f"**Scraping completed successfully**\n\n"
-            f"Product ID: {product_data.get('product_id', 'N/A')}\n"
-            f"Scraped at: {product_data.get('scraped_at', 'N/A')}\n"
-            f"Images found: {len(product_data.get('thumbnail_images', []))} thumbnails, "
-            f"{len(product_data.get('detail_images', []))} details\n"
-            f"Reviews: {len(product_data.get('reviews', []))}\n"
-            f"Parameters: {len(product_data.get('parameters', []))}\n\n"
-            f"---\n\n"
+        # Fetch all product info and images with pagination
+        return await fetch_product_with_images(
+            product_data,
+            offset=offset,
+            limit=limit,
+            include_preview=True
         )
-
-        full_response = metadata + markdown_output
-
-        return [TextContent(type="text", text=full_response)]
 
     except ValueError as e:
-        # Input validation or product ID extraction error
-        error_message = str(e)
-
-        # Check if it's a short link that failed to resolve
-        if "Could not extract product ID" in error_message and "e.tb.cn" in error_message:
-            error_text = (
-                f"**Error: Short link resolution failed**\n\n"
-                f"{error_message}\n\n"
-                f"**Possible causes**:\n"
-                f"- Short link expired or invalid\n"
-                f"- Network timeout during resolution\n"
-                f"- Taobao blocked the resolution attempt\n\n"
-                f"**Please try**:\n"
-                f"1. Use the **full share text** (recommended): `【淘宝】product name https://e.tb.cn/h.xxx`\n"
-                f"2. Get the direct product URL from browser address bar\n"
-                f"3. Use just the product ID (12-13 digits)\n\n"
-                f"**Accepted formats**:\n"
-                f"- ✅ Full share text: '【淘宝】假一赔四 https://e.tb.cn/h.xxx MF287「产品名」'\n"
-                f"- ✅ Product ID: '881280651752'\n"
-                f"- ✅ Direct URL: 'https://detail.tmall.com/item.htm?id=881280651752'\n"
-                f"- ⚠️  Short link alone: 'https://e.tb.cn/h.xxx' (may fail due to anti-bot protection)"
-            )
-        else:
-            error_text = (
-                f"**Error: Invalid input**\n\n"
-                f"{error_message}\n\n"
-                f"**Accepted formats**:\n"
-                f"- Product ID: '881280651752'\n"
-                f"- Direct URL: 'https://detail.tmall.com/item.htm?id=881280651752'\n"
-                f"- Short link: 'https://e.tb.cn/h.xxx'\n"
-                f"- Share text: '【淘宝】product https://e.tb.cn/h.xxx'"
-            )
-        return [TextContent(type="text", text=error_text)]
-
+        return [TextContent(type="text", text=f"**Error**: {str(e)}")]
     except RuntimeError as e:
-        # Scraping error (login required, timeout, etc.)
-        error_text = (
-            f"**Error during scraping**\n\n"
-            f"{str(e)}\n\n"
-            f"**Possible causes**:\n"
-            f"- Login session expired - try calling taobao_initialize_login again\n"
-            f"- Network timeout - check internet connection\n"
-            f"- Page structure changed - scraper may need updates\n"
-            f"- Product page unavailable or removed"
-        )
-        return [TextContent(type="text", text=error_text)]
-
+        return [TextContent(type="text", text=f"**Error**: {str(e)}")]
     except Exception as e:
-        # Unexpected error
-        error_text = (
-            f"**Unexpected error**\n\n"
-            f"An unexpected error occurred while fetching product information.\n\n"
-            f"**Error details**: {str(e)}\n\n"
-            f"**Please try**:\n"
-            f"- Restarting the MCP server\n"
-            f"- Calling taobao_initialize_login again\n"
-            f"- Verifying the product URL or ID is correct"
-        )
-        return [TextContent(type="text", text=error_text)]
+        return [TextContent(type="text", text=f"**Unexpected error**: {str(e)}")]
 
+
+# ==================== MAIN ====================
 
 async def main():
-    """
-    Main entry point for the MCP server.
-
-    Starts the server and handles stdio communication.
-    """
+    """Main entry point for the MCP server."""
     async with stdio_server() as (read_stream, write_stream):
         await mcp_server.run(
             read_stream,
@@ -405,12 +372,12 @@ async def main():
         )
 
 
-# Cleanup on exit
 async def cleanup():
     """Clean up resources on server shutdown"""
     global scraper
     if scraper:
         await scraper.close()
+    product_cache.clear()
 
 
 if __name__ == "__main__":
